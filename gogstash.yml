@@ -1,0 +1,12 @@
+input:
+  - type: file
+    path: "/var/log/deepWater.log"
+    start_position: "beginning"
+
+output:
+  - type: elastic
+    url: ["http://127.0.0.1:9200"]
+    index: "gogstash-log"
+
+  - type: prometheus
+    address: "172.29.58.96:8082"

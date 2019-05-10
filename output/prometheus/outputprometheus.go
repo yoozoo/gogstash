@@ -3,6 +3,7 @@ package outputprometheus
 import (
 	"context"
 	"net/http"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/tsaikd/gogstash/config"
@@ -31,8 +32,8 @@ func DefaultOutputConfig() OutputConfig {
 		},
 		Address: ":8080",
 		MsgCount: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "processed_messages_total",
-			Help: "Number of processed messages",
+			Name: "status_400_total",
+			Help: "Number of status code 400 in messages",
 		}),
 	}
 }
@@ -54,7 +55,9 @@ func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputC
 
 // Output event
 func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
-	o.MsgCount.Inc()
+	if strings.Contains(event.Message, "\"status\":400") {
+		o.MsgCount.Inc()
+	}
 	return
 }
 
