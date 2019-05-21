@@ -2,6 +2,7 @@ package outputprometheus
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -10,26 +11,36 @@ import (
 	"github.com/tsaikd/gogstash/config"
 	"github.com/tsaikd/gogstash/config/goglog"
 	"github.com/tsaikd/gogstash/config/logevent"
+	prometheus_conf "github.com/tsaikd/gogstash/config/prometheus"
+	protoconf "github.com/yoozoo/protoconf_go"
 )
 
 const (
 	// ModuleName is the name used in config file
 	ModuleName = "prometheus"
-	// Counter is the counter metric type
-	Counter = 0
-	// Gauge is the gauge metric type
-	Gauge = 1
+	// counter is the counter metric type
+	counter = 0
+	// gauge is the gauge metric type
+	gauge = 1
+	// appNameField is the field for app name
+	appNameField = "log_topics"
+	// defaultAppName is the app name for default config
+	// defaultAppName = "gogstash"
+	appToken = ""
 )
+
+var regexMap = make(map[string]*regexp.Regexp)
 
 // OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
-	Address    string                `json:"address,omitempty"`
-	AppConfigs map[string]*AppConfig `json:"app_configs,omitempty"`
+	Address    string            `json:"address,omitempty"`
+	AppConfigs map[string][]Rule `json:"app_configs,omitempty"`
 }
 
-// AppConfig holds the configuration for each app
-type AppConfig struct {
+// Rule holds the configuration for each app
+type Rule struct {
+	Name       string               `json:"name,omitempty"`
 	Regex      string               `json:"regex,omitempty"`
 	MetricName string               `json:"metric_name,omitempty"`
 	MetricType int                  `json:"metric_type,omitempty"`
@@ -37,13 +48,88 @@ type AppConfig struct {
 }
 
 // DefaultOutputConfig returns an OutputConfig struct with default values
-func DefaultOutputConfig() OutputConfig {
-	// default app is gogstash
-	appConfs := make(map[string]*AppConfig, 1)
-	appConfs["gogstash"] = &AppConfig{
-		MsgMetric: prometheus.NewCounter(prometheus.CounterOpts{
-			Name: "processed_messages_total",
-		}),
+// func DefaultOutputConfig() OutputConfig {
+// 	// default app is gogstash
+// 	appConfs := make(map[string][]Rule, 1)
+// 	appConfs[defaultAppName] = []Rule{
+// 		Rule{
+// 			Name: "default_rule",
+// 			MsgMetric: prometheus.NewCounter(prometheus.CounterOpts{
+// 				Name: "processed_messages_total",
+// 			}),
+// 		},
+// 	}
+
+// 	return OutputConfig{
+// 		OutputConfig: config.OutputConfig{
+// 			CommonConfig: config.CommonConfig{
+// 				Type: ModuleName,
+// 			},
+// 		},
+// 		Address: ":8080",
+
+// 		AppConfigs: appConfs,
+// 	}
+// }
+
+func initConfig() (OutputConfig, error) {
+	// get etcd connection
+	etcd := protoconf.NewEtcdReader("default")
+	etcd.SetToken(appToken)
+	reader := protoconf.NewConfigurationReader(etcd)
+	// get config instance
+	config := prometheus_conf.GetInstance()
+	if err := reader.Config(config); err != nil {
+		return nil, err
+	}
+	// generate output config
+	address := config.GetAddress()
+	ruleMap := config.GetApp_configs()
+
+	appConfs := make(map[string][]Rule)
+
+	for ruleName, rule := range ruleMap {
+		metricName := rule.GetMetric_name()
+		metricType := rule.GetMetric_type()
+
+		// add new rule
+		newRule := Rule{
+			Name:       ruleName,
+			Regex:      rule.GetRegex(),
+			MetricName: metricName,
+			MetricType: metricType,
+		}
+
+		// add new metric
+		var metric prometheus.Collector
+		option := prometheus.CounterOpts{
+			Name: metricName,
+		}
+		// according to metric type
+		switch metricType {
+		case counter:
+			metric = prometheus.NewCounter(option)
+		case gauge:
+			metric = prometheus.NewGauge(option)
+		default:
+			return nil, fmt.Errorf("config init failed: unsupported metric type")
+		}
+		newRule.MsgMetric = metric
+
+		// add rule to app config
+		appName := rule.GetApp_name()
+
+		appRules, ok := appConfs[appName]
+		if ok {
+			// if already add app
+			appRules = append(appRules, newRule)
+		} else {
+			appRules = []Rule{
+				newRule,
+			}
+		}
+		appConfs[appName] = appRules
+
 	}
 
 	return OutputConfig{
@@ -52,23 +138,30 @@ func DefaultOutputConfig() OutputConfig {
 				Type: ModuleName,
 			},
 		},
-		Address: ":8080",
+		Address: address,
 
 		AppConfigs: appConfs,
-	}
+	}, nil
 }
 
 // InitHandler initialize the output plugin
 func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
-	conf := DefaultOutputConfig()
-	if err := config.ReflectConfig(raw, &conf); err != nil {
+	// conf := DefaultOutputConfig()
+	// if err := config.ReflectConfig(raw, &conf); err != nil {
+	// 	return nil, err
+	// }
+
+	conf, err := initConfig()
+	if err != nil {
 		return nil, err
 	}
 
 	// register metric for each app
-	for _, v := range conf.AppConfigs {
-		if err := prometheus.Register(v.MsgMetric); err != nil {
-			return nil, err
+	for _, appConf := range conf.AppConfigs {
+		for _, rule := range appConf {
+			if err := prometheus.Register(rule.MsgMetric); err != nil {
+				return nil, err
+			}
 		}
 	}
 
@@ -81,29 +174,41 @@ func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputC
 func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	msg := event.Message
 	// filter by app name
-	appName := event.GetString("log_topics")
+	appName := event.GetString(appNameField)
 
-	if v, ok := o.AppConfigs[appName]; ok {
-		r := regexp.MustCompile(v.Regex)
-		msgMetric := v.MsgMetric
-		metricType := v.MetricType
-
-		if r.MatchString(msg) {
-			// for counter type metric
-			if metricType == Counter {
-				msgMetric.(prometheus.Counter).Inc()
+	if rules, ok := o.AppConfigs[appName]; ok {
+		// check each rule in the app config
+		for _, v := range rules {
+			// find regex from memory
+			r, ok := regexMap[v.Name]
+			if !ok {
+				// compile new regex if not found
+				r = regexp.MustCompile(v.Regex)
 			}
 
-			// for gauge type metric
-			if metricType == Gauge {
-				// filter gauge number from message
-				numStr := r.ReplaceAllLiteralString(msg, "")
-				s, err := strconv.ParseFloat(numStr, 64)
-				if err != nil {
-					return err
-				}
+			msgMetric := v.MsgMetric
+			metricType := v.MetricType
 
-				msgMetric.(prometheus.Gauge).Set(s)
+			if r.MatchString(msg) {
+				switch metricType {
+				case counter:
+					// for counter type metric
+					msgMetric.(prometheus.Counter).Inc()
+
+				case gauge:
+					// for gauge type metric
+					// filter gauge number from message
+					numStr := r.ReplaceAllLiteralString(msg, "")
+					s, err := strconv.ParseFloat(numStr, 64)
+					if err != nil {
+						return err
+					}
+
+					msgMetric.(prometheus.Gauge).Set(s)
+
+				default:
+					return fmt.Errorf("generate output failed: unsupported metric type")
+				}
 			}
 		}
 	}

@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+package config;
+
+import "protoconf_common.proto";
+
+option go_package = "prometheus";
+option (app_name) = "北美平台-gogstash";
+
+message Config {
+    string address = 1 [(default)="8080"];
+    map<string, AppConfig> app_configs = 2;
+}
+
+message AppConfig {
+    string app_name = 1;
+    string regex = 2;
+    string metric_name = 6;
+    int32 metric_type = 7;
+}
