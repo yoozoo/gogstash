@@ -23,10 +23,9 @@ const (
 	// gauge is the gauge metric type
 	gauge = 1
 	// appNameField is the field for app name
-	appNameField = "log_topics"
-	// defaultAppName is the app name for default config
-	// defaultAppName = "gogstash"
-	appToken = ""
+	appNameField = "fields.log_topics"
+
+	appToken = "U2FsdGVkX1/ABMEECkUiiZ6wKgfA3R5pDR7iOvwrBbhqkulGlZ1pDFX/9mVDCQiP"
 )
 
 var regexMap = make(map[string]*regexp.Regexp)
@@ -47,50 +46,25 @@ type Rule struct {
 	MsgMetric  prometheus.Collector `json:"-"`
 }
 
-// DefaultOutputConfig returns an OutputConfig struct with default values
-// func DefaultOutputConfig() OutputConfig {
-// 	// default app is gogstash
-// 	appConfs := make(map[string][]Rule, 1)
-// 	appConfs[defaultAppName] = []Rule{
-// 		Rule{
-// 			Name: "default_rule",
-// 			MsgMetric: prometheus.NewCounter(prometheus.CounterOpts{
-// 				Name: "processed_messages_total",
-// 			}),
-// 		},
-// 	}
-
-// 	return OutputConfig{
-// 		OutputConfig: config.OutputConfig{
-// 			CommonConfig: config.CommonConfig{
-// 				Type: ModuleName,
-// 			},
-// 		},
-// 		Address: ":8080",
-
-// 		AppConfigs: appConfs,
-// 	}
-// }
-
-func initConfig() (OutputConfig, error) {
+func initConfig() (*OutputConfig, error) {
 	// get etcd connection
 	etcd := protoconf.NewEtcdReader("default")
 	etcd.SetToken(appToken)
 	reader := protoconf.NewConfigurationReader(etcd)
 	// get config instance
-	config := prometheus_conf.GetInstance()
-	if err := reader.Config(config); err != nil {
+	conf := prometheus_conf.GetInstance()
+	if err := reader.Config(conf); err != nil {
 		return nil, err
 	}
 	// generate output config
-	address := config.GetAddress()
-	ruleMap := config.GetApp_configs()
+	address := conf.GetAddress()
+	ruleMap := conf.GetApp_configs()
 
 	appConfs := make(map[string][]Rule)
 
 	for ruleName, rule := range ruleMap {
 		metricName := rule.GetMetric_name()
-		metricType := rule.GetMetric_type()
+		metricType := int(rule.GetMetric_type())
 
 		// add new rule
 		newRule := Rule{
@@ -102,15 +76,16 @@ func initConfig() (OutputConfig, error) {
 
 		// add new metric
 		var metric prometheus.Collector
-		option := prometheus.CounterOpts{
-			Name: metricName,
-		}
 		// according to metric type
 		switch metricType {
 		case counter:
-			metric = prometheus.NewCounter(option)
+			metric = prometheus.NewCounter(prometheus.CounterOpts{
+				Name: metricName,
+			})
 		case gauge:
-			metric = prometheus.NewGauge(option)
+			metric = prometheus.NewGauge(prometheus.GaugeOpts{
+				Name: metricName,
+			})
 		default:
 			return nil, fmt.Errorf("config init failed: unsupported metric type")
 		}
@@ -132,7 +107,7 @@ func initConfig() (OutputConfig, error) {
 
 	}
 
-	return OutputConfig{
+	return &OutputConfig{
 		OutputConfig: config.OutputConfig{
 			CommonConfig: config.CommonConfig{
 				Type: ModuleName,
@@ -146,11 +121,6 @@ func initConfig() (OutputConfig, error) {
 
 // InitHandler initialize the output plugin
 func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
-	// conf := DefaultOutputConfig()
-	// if err := config.ReflectConfig(raw, &conf); err != nil {
-	// 	return nil, err
-	// }
-
 	conf, err := initConfig()
 	if err != nil {
 		return nil, err
@@ -167,7 +137,7 @@ func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputC
 
 	go conf.serveHTTP()
 
-	return &conf, nil
+	return conf, nil
 }
 
 // Output event
