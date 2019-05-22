@@ -1,12 +1,16 @@
 input:
-  - type: file
-    path: "/var/log/deepWater.log"
-    start_position: "beginning"
+  - type: "beats"
+    host: "172.29.58.96"
+    port: 5044
+
+# filter:
+#   - type: mutate
+#     replace: ["gameId", "game_id"]
 
 output:
-  - type: elastic
-    url: ["http://127.0.0.1:9200"]
-    index: "gogstash-log"
+  - type: "elastic"
+    url: ["http://172.29.58.96:9200"]
+    index: "%{[log_topics]}--%{+YYYY.MM.dd}"
+    document_type: "%{[@metadata][type]}"
 
-  - type: prometheus
-    address: "172.29.58.96:8082"
+  - type: "prometheus"
