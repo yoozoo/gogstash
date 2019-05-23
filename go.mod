@@ -68,7 +68,7 @@ require (
 	github.com/tsaikd/KDGoLib v0.0.0-20190103121848-9f98a0557044
 	github.com/ua-parser/uap-go v0.0.0-20190303233514-1004ccd816b3
 	github.com/vjeantet/grok v1.0.0
-	github.com/yoozoo/protoconf_go v0.0.0-20190522092003-9d0aa71581e3
+	github.com/yoozoo/protoconf_go v0.0.0-20190523081933-9ac63070b6ed
 	github.com/yuin/gopher-lua v0.0.0-20190206043414-8bfc7677f583 // indirect
 	golang.org/x/sync v0.0.0-20181221193216-37e7f081c4d4
 	google.golang.org/appengine v1.5.0 // indirect
