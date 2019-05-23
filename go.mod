@@ -3,13 +3,15 @@ module github.com/tsaikd/gogstash
 go 1.12
 
 require (
-	github.com/BurntSushi/toml v0.3.1 // indirect
 	github.com/Knetic/govaluate v3.0.0+incompatible
 	github.com/alicebob/gopher-json v0.0.0-20180125190556-5a6b3ba71ee6 // indirect
 	github.com/alicebob/miniredis v2.5.0+incompatible
 	github.com/beorn7/perks v0.0.0-20180321164747-3a771d992973 // indirect
+	github.com/bgentry/speakeasy v0.1.0 // indirect
 	github.com/bitly/go-hostpool v0.0.0-20171023180738-a3a6125de932
+	github.com/c-bata/go-prompt v0.2.3 // indirect
 	github.com/codegangsta/inject v0.0.0-20140425184007-37d7f8432a3e // indirect
+	github.com/coreos/etcd v3.3.13+incompatible // indirect
 	github.com/drhodes/golorem v0.0.0-20160418191928-ecccc744c2d9
 	github.com/elastic/go-lumber v0.1.0
 	github.com/fortytw2/leaktest v1.3.0 // indirect
@@ -32,17 +34,21 @@ require (
 	github.com/libp2p/go-reuseport v0.0.1
 	github.com/magiconair/properties v1.8.0 // indirect
 	github.com/mailru/easyjson v0.0.0-20180723221831-d5012789d665 // indirect
+	github.com/mattn/go-runewidth v0.0.4 // indirect
 	github.com/mattn/go-sqlite3 v1.10.0 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.1 // indirect
+	github.com/mitchellh/go-homedir v1.1.0 // indirect
 	github.com/mitchellh/mapstructure v0.0.0-20180715050151-f15292f7a699 // indirect
 	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
 	github.com/modern-go/reflect2 v1.0.1 // indirect
+	github.com/olekukonko/tablewriter v0.0.1 // indirect
 	github.com/olivere/elastic v6.2.17+incompatible // indirect
 	github.com/onsi/ginkgo v1.8.0 // indirect
 	github.com/onsi/gomega v1.5.0 // indirect
 	github.com/oschwald/geoip2-golang v1.2.1
 	github.com/oschwald/maxminddb-golang v1.3.0 // indirect
 	github.com/pelletier/go-toml v1.2.0 // indirect
+	github.com/pkg/term v0.0.0-20190109203006-aa71e9d9e942 // indirect
 	github.com/prometheus/client_golang v0.8.0
 	github.com/prometheus/client_model v0.0.0-20180712105110-5c3871d89910 // indirect
 	github.com/prometheus/common v0.0.0-20180518154759-7600349dcfe1 // indirect
@@ -62,12 +68,15 @@ require (
 	github.com/tsaikd/KDGoLib v0.0.0-20190103121848-9f98a0557044
 	github.com/ua-parser/uap-go v0.0.0-20190303233514-1004ccd816b3
 	github.com/vjeantet/grok v1.0.0
+	github.com/yoozoo/protoconf_go v0.0.0-20190522092003-9d0aa71581e3
 	github.com/yuin/gopher-lua v0.0.0-20190206043414-8bfc7677f583 // indirect
 	golang.org/x/sync v0.0.0-20181221193216-37e7f081c4d4
 	google.golang.org/appengine v1.5.0 // indirect
+	google.golang.org/grpc v1.21.0 // indirect
 	gopkg.in/alexcesaro/quotedprintable.v3 v3.0.0-20150716171945-2caba252f4dc // indirect
 	gopkg.in/gomail.v2 v2.0.0-20160411212932-81ebce5c23df
 	gopkg.in/olivere/elastic.v6 v6.2.17
 	gopkg.in/redis.v5 v5.2.9
 	gopkg.in/yaml.v2 v2.2.1
+	version.uuzu.com/Merlion/protoconf v0.1.11 // indirect
 )

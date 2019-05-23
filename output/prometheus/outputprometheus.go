@@ -33,17 +33,20 @@ var regexMap = make(map[string]*regexp.Regexp)
 // OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
 	config.OutputConfig
-	Address    string            `json:"address,omitempty"`
-	AppConfigs map[string][]Rule `json:"app_configs,omitempty"`
+	Address    string `json:"address,omitempty"`
+	AppConfigs map[string]AppConfig
 }
 
-// Rule holds the configuration for each app
-type Rule struct {
-	Name       string               `json:"name,omitempty"`
+// AppConfig holds all the metrics information for app
+type AppConfig struct {
+	Metrics map[string]Metric
+}
+
+// Metric holds the metric configuration
+type Metric struct {
 	Regex      string               `json:"regex,omitempty"`
-	MetricName string               `json:"metric_name,omitempty"`
 	MetricType int                  `json:"metric_type,omitempty"`
-	MsgMetric  prometheus.Collector `json:"-"`
+	Collector  prometheus.Collector `json:"-"`
 }
 
 func initConfig() (*OutputConfig, error) {
@@ -56,55 +59,56 @@ func initConfig() (*OutputConfig, error) {
 	if err := reader.Config(conf); err != nil {
 		return nil, err
 	}
-	// generate output config
-	address := conf.GetAddress()
-	ruleMap := conf.GetApp_configs()
 
-	appConfs := make(map[string][]Rule)
+	// watch app configs change
+	reader.WatchKeys(conf)
 
-	for ruleName, rule := range ruleMap {
-		metricName := rule.GetMetric_name()
-		metricType := int(rule.GetMetric_type())
+	// save app config in the new map with the new app name
+	newAppConfs := make(map[string]AppConfig)
 
-		// add new rule
-		newRule := Rule{
-			Name:       ruleName,
-			Regex:      rule.GetRegex(),
-			MetricName: metricName,
-			MetricType: metricType,
-		}
+	appConfigs := conf.GetApp_configs()
 
-		// add new metric
-		var metric prometheus.Collector
-		// according to metric type
-		switch metricType {
-		case counter:
-			metric = prometheus.NewCounter(prometheus.CounterOpts{
-				Name: metricName,
-			})
-		case gauge:
-			metric = prometheus.NewGauge(prometheus.GaugeOpts{
-				Name: metricName,
-			})
-		default:
-			return nil, fmt.Errorf("config init failed: unsupported metric type")
-		}
-		newRule.MsgMetric = metric
+	for _, appConfig := range appConfigs {
+		appName := appConfig.GetApp_name()
+		newMetrics := make(map[string]Metric)
 
-		// add rule to app config
-		appName := rule.GetApp_name()
+		for _, metric := range appConfig.GetMetrics() {
+			metricType := int(metric.GetMetric_type())
+			metricName := metric.GetMetric_name()
 
-		appRules, ok := appConfs[appName]
-		if ok {
-			// if already add app
-			appRules = append(appRules, newRule)
-		} else {
-			appRules = []Rule{
-				newRule,
+			// add new metric collector
+			var collector prometheus.Collector
+			// according to metric type
+			switch metricType {
+			case counter:
+				collector = prometheus.NewCounter(prometheus.CounterOpts{
+					Namespace: appName,
+					Name:      metricName,
+				})
+			case gauge:
+				collector = prometheus.NewGauge(prometheus.GaugeOpts{
+					Namespace: appName,
+					Name:      metricName,
+				})
+			default:
+				return nil, fmt.Errorf("config init failed: unsupported metric type")
+			}
+
+			// register collector for each app
+			if err := prometheus.Register(collector); err != nil {
+				return nil, err
+			}
+
+			newMetrics[metricName] = Metric{
+				Collector:  collector,
+				MetricType: metricType,
+				Regex:      metric.GetRegex(),
 			}
 		}
-		appConfs[appName] = appRules
 
+		newAppConfs[appName] = AppConfig{
+			Metrics: newMetrics,
+		}
 	}
 
 	return &OutputConfig{
@@ -113,26 +117,17 @@ func initConfig() (*OutputConfig, error) {
 				Type: ModuleName,
 			},
 		},
-		Address: address,
-
-		AppConfigs: appConfs,
+		Address:    conf.GetAddress(),
+		AppConfigs: newAppConfs,
 	}, nil
 }
 
 // InitHandler initialize the output plugin
 func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
+	// initialize config and register metrics
 	conf, err := initConfig()
 	if err != nil {
 		return nil, err
-	}
-
-	// register metric for each app
-	for _, appConf := range conf.AppConfigs {
-		for _, rule := range appConf {
-			if err := prometheus.Register(rule.MsgMetric); err != nil {
-				return nil, err
-			}
-		}
 	}
 
 	go conf.serveHTTP()
@@ -146,24 +141,25 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 	// filter by app name
 	appName := event.GetString(appNameField)
 
-	if rules, ok := o.AppConfigs[appName]; ok {
+	if appConf, ok := o.AppConfigs[appName]; ok {
 		// check each rule in the app config
-		for _, v := range rules {
+		for metricName, metric := range appConf.Metrics {
 			// find regex from memory
-			r, ok := regexMap[v.Name]
+			r, ok := regexMap[appName+"_"+metricName]
 			if !ok {
-				// compile new regex if not found
-				r = regexp.MustCompile(v.Regex)
+				// compile new regex if not found and put in map
+				r = regexp.MustCompile(metric.Regex)
+				regexMap[appName+"_"+metricName] = r
 			}
 
-			msgMetric := v.MsgMetric
-			metricType := v.MetricType
+			collector := metric.Collector
+			metricType := metric.MetricType
 
 			if r.MatchString(msg) {
 				switch metricType {
 				case counter:
 					// for counter type metric
-					msgMetric.(prometheus.Counter).Inc()
+					collector.(prometheus.Counter).Inc()
 
 				case gauge:
 					// for gauge type metric
@@ -174,7 +170,7 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 						return err
 					}
 
-					msgMetric.(prometheus.Gauge).Set(s)
+					collector.(prometheus.Gauge).Set(s)
 
 				default:
 					return fmt.Errorf("generate output failed: unsupported metric type")
