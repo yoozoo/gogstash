@@ -69,7 +69,7 @@ func initConfig() (*OutputConfig, error) {
 		// create new appCh and create new data channel and config channel
 		appMaps[appName] = &appCh{
 			dataCh: make(chan *logevent.LogEvent),
-			cfgCh:  make(chan *appCfg, 200),
+			cfgCh:  make(chan *appCfg, 1),
 		}
 		// add each metric configuration to the app configuration
 		appConf := &appCfg{
