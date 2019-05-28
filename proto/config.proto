@@ -9,7 +9,7 @@ option (app_name) = "北美平台-gogstash";
 
 message Config {
     string address = 1 [(default)="8080"];
-    map<string, AppConfig> app_configs = 2;
+    map<string, AppConfig> app_configs = 2 [(watch)=true];
 }
 
 message AppConfig {
