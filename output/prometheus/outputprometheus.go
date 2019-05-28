@@ -45,7 +45,7 @@ type OutputConfig struct {
 }
 
 type appCh struct {
-	dataCh chan *logevent.LogEvent
+	dataCh chan logevent.LogEvent
 	cfgCh  chan *prometheus_conf.AppConfig
 	quitCh chan bool
 }
@@ -56,35 +56,23 @@ type appCfg struct {
 	metricCfgs map[string]*metricCfg
 }
 
-// metric holds the metric configuration
+// metricCfg holds the metric configuration
 type metricCfg struct {
 	metric    prometheus_conf.Metric
 	collector prometheus.Collector
+	regex     regexp.Regexp
 }
 
 func initConfig() (*OutputConfig, error) {
-	conf := prometheus_conf.GetInstance()
-	if err := reader.Config(conf); err != nil {
+	// load app config from protoconf
+	conf, err := loadAppConfig()
+	if err != nil {
 		return nil, err
 	}
-	conf.WatchApp_configs(reloadConfig)
-	reader.WatchKeys(conf)
 
-	for _, appConfig := range conf.GetApp_configs() {
-		appName := appConfig.GetApp_name()
-		// create new appCh and create new data channel and config channel
-		a := &appCh{
-			dataCh: make(chan *logevent.LogEvent, 100),
-			cfgCh:  make(chan *prometheus_conf.AppConfig, 1),
-			quitCh: make(chan bool),
-		}
-		// add each metric configuration to the app configuration
-		// send app config to the config channel
-		a.cfgCh <- appConfig
-		mutex.Lock()
-		appMap[appName] = a
-		mutex.Unlock()
-	}
+	// watch app configuration change
+	conf.WatchApp_configs(func(string) { loadAppConfig() })
+	reader.WatchKeys(conf)
 
 	outputConf := &OutputConfig{
 		OutputConfig: config.OutputConfig{
@@ -96,6 +84,151 @@ func initConfig() (*OutputConfig, error) {
 	}
 
 	return outputConf, nil
+}
+
+func loadAppConfig() (*prometheus_conf.Config, error) {
+	// load from protoconf
+	conf := prometheus_conf.GetInstance()
+	if err := reader.Config(conf); err != nil {
+		return nil, err
+	}
+
+	newApps := make(map[string]int)
+
+	for _, appConfig := range conf.GetApp_configs() {
+		appName := appConfig.GetApp_name()
+
+		mutex.Lock()
+		if a, ok := appMap[appName]; ok {
+			a.cfgCh <- appConfig
+		} else {
+			// new app config
+			// send app config to the config channel
+			// create new appCh and create new data channel and config channel
+			a := &appCh{
+				dataCh: make(chan logevent.LogEvent),
+				cfgCh:  make(chan *prometheus_conf.AppConfig, 1),
+				quitCh: make(chan bool),
+			}
+			go processOutput(a.dataCh, a.cfgCh, a.quitCh)
+			a.cfgCh <- appConfig
+			appMap[appName] = a
+		}
+		mutex.Unlock()
+		newApps[appName] = 1
+	}
+
+	// check if app config not exist in runtime, delete it
+	for appName, a := range appMap {
+		mutex.Lock()
+		if _, ok := newApps[appName]; !ok {
+			a.quitCh <- true
+			delete(appMap, appName)
+		}
+		mutex.Unlock()
+	}
+
+	return conf, nil
+}
+
+// InitHandler initialize the output plugin
+func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
+	// get etcd connection
+	etcd := protoconf.NewEtcdReader(env)
+	etcd.SetToken(appToken)
+	reader = protoconf.NewConfigurationReader(etcd)
+
+	// initialize config
+	conf, err := initConfig()
+	if err != nil {
+		return nil, err
+	}
+
+	go conf.serveHTTP()
+
+	return conf, nil
+}
+
+func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *prometheus_conf.AppConfig, quitCh chan bool) {
+	// init app config
+	a := &appCfg{
+		metricCfgs: make(map[string]*metricCfg),
+	}
+	for {
+		select {
+		case cfg := <-cfgCh:
+			newMetricMap := make(map[string]int)
+
+			// when new config comes, check if it is the same, and if not, replace with the new config
+			for _, metric := range cfg.GetMetrics() {
+				newMetricMap[metric.GetMetric_name()] = 1
+				if m, ok := a.metricCfgs[metric.GetMetric_name()]; ok {
+					if m.metric.GetMetric_type() != metric.GetMetric_type() || m.metric.GetRegex() != metric.GetRegex() {
+						prometheus.Unregister(m.collector)
+						err := a.regNewMetric(metric)
+						if err != nil {
+							fmt.Printf("failed to register new metric: %s\n", err)
+						}
+
+					}
+				} else {
+					// add new metric
+					a.appName = cfg.GetApp_name()
+					err := a.regNewMetric(metric)
+					if err != nil {
+						fmt.Printf("failed to register new metric: %s\n", err)
+					}
+				}
+			}
+
+			// delete metrics not exist in runtime
+			for _, metricCfg := range a.metricCfgs {
+				if _, ok := newMetricMap[metricCfg.metric.GetMetric_name()]; !ok {
+					prometheus.Unregister(metricCfg.collector)
+					delete(a.metricCfgs, metricCfg.metric.GetMetric_name())
+				}
+			}
+		case data := <-dataCh:
+			// new data comes
+			// check each rule in the app config
+			for _, m := range a.metricCfgs {
+				collector := m.collector
+				metricType := m.metric.GetMetric_type()
+
+				msg := data.Message
+				r := &m.regex
+
+				if r.MatchString(msg) {
+					switch metricType {
+					case counter:
+						// for counter type metric
+						collector.(prometheus.Counter).Inc()
+
+					case gauge:
+						// for gauge type metric
+						// filter gauge number from message
+						numStr := r.ReplaceAllLiteralString(msg, "")
+						s, err := strconv.ParseFloat(numStr, 64)
+						if err != nil {
+							fmt.Printf("parse error: %s\n", err)
+						}
+
+						collector.(prometheus.Gauge).Set(s)
+
+					default:
+						fmt.Printf("generate output failed: unsupported metric type %d", metricType)
+					}
+				}
+			}
+		case <-quitCh:
+			// quit goroutine and unregister all metrics when app is deleted
+			for _, m := range a.metricCfgs {
+				prometheus.Unregister(m.collector)
+			}
+			return
+		default:
+		}
+	}
 }
 
 func (a *appCfg) regNewMetric(m *prometheus_conf.Metric) error {
@@ -127,161 +260,15 @@ func (a *appCfg) regNewMetric(m *prometheus_conf.Metric) error {
 		return err
 	}
 
+	r := regexp.MustCompile(m.GetRegex())
+
 	a.metricCfgs[metricName] = &metricCfg{
 		collector: collector,
 		metric:    *m,
+		regex:     *r,
 	}
 
 	return nil
-}
-
-func reloadConfig(string) {
-	conf := prometheus_conf.GetInstance()
-	if err := reader.Config(conf); err != nil {
-		fmt.Printf("failed to load config from protoconf: %s\n", err)
-	}
-
-	newApps := make(map[string]int)
-	for _, appConfig := range conf.GetApp_configs() {
-		appName := appConfig.GetApp_name()
-
-		mutex.Lock()
-		a, ok := appMap[appName]
-		if !ok {
-			// existing app config
-			// send app config to the config channel
-			// create new appCh and create new data channel and config channel
-			a := &appCh{
-				dataCh: make(chan *logevent.LogEvent, 100),
-				cfgCh:  make(chan *prometheus_conf.AppConfig, 1),
-				quitCh: make(chan bool),
-			}
-			go processOutput(a.dataCh, a.cfgCh, a.quitCh)
-			appMap[appName] = a
-		}
-		mutex.Unlock()
-		a.cfgCh <- appConfig
-		newApps[appName] = 1
-	}
-
-	for appName, a := range appMap {
-		mutex.Lock()
-		if _, ok := newApps[appName]; !ok {
-			a.quitCh <- true
-			delete(appMap, appName)
-		}
-		mutex.Unlock()
-	}
-
-}
-
-// InitHandler initialize the output plugin
-func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
-	// get etcd connection
-	etcd := protoconf.NewEtcdReader(env)
-	etcd.SetToken(appToken)
-	reader = protoconf.NewConfigurationReader(etcd)
-
-	// initialize config and register metrics
-	conf, err := initConfig()
-	if err != nil {
-		return nil, err
-	}
-
-	// start go routine for each app
-	for _, appCh := range appMap {
-		go processOutput(appCh.dataCh, appCh.cfgCh, appCh.quitCh)
-	}
-
-	go conf.serveHTTP()
-
-	return conf, nil
-}
-
-func processOutput(dataCh chan *logevent.LogEvent, cfgCh chan *prometheus_conf.AppConfig, quitCh chan bool) {
-	a := &appCfg{
-		metricCfgs: make(map[string]*metricCfg),
-	}
-	for {
-		select {
-		case cfg := <-cfgCh:
-			newMetricMap := make(map[string]int)
-			// when new config comes, check if it is the same, and if not, replace with the new config
-			for _, metric := range cfg.GetMetrics() {
-				newMetricMap[metric.GetMetric_name()] = 1
-				if m, ok := a.metricCfgs[metric.GetMetric_name()]; ok {
-					if m.metric.GetMetric_type() != metric.GetMetric_type() || m.metric.GetRegex() != metric.GetRegex() {
-						prometheus.Unregister(m.collector)
-						err := a.regNewMetric(metric)
-						if err != nil {
-							fmt.Printf("failed to register new metric: %s\n", err)
-						}
-					}
-				} else {
-					a.appName = cfg.GetApp_name()
-					err := a.regNewMetric(metric)
-					if err != nil {
-						fmt.Printf("failed to register new metric: %s\n", err)
-					}
-				}
-			}
-
-			for _, metricCfg := range a.metricCfgs {
-				if _, ok := newMetricMap[metricCfg.metric.GetMetric_name()]; !ok {
-					prometheus.Unregister(metricCfg.collector)
-					delete(a.metricCfgs, metricCfg.metric.GetMetric_name())
-				}
-			}
-		case data := <-dataCh:
-			// check each rule in the app config
-			for metricName, m := range a.metricCfgs {
-				// find regex from memory
-				mutex.RLock()
-				r, ok := regexMap[a.appName+"_"+metricName]
-				mutex.RUnlock()
-				if !ok {
-					// compile new regex if not found and put in map
-					r = regexp.MustCompile(m.metric.GetRegex())
-					mutex.Lock()
-					regexMap[a.appName+"_"+metricName] = r
-					mutex.Unlock()
-				}
-
-				collector := m.collector
-				metricType := m.metric.GetMetric_type()
-
-				msg := data.Message
-
-				if r.MatchString(msg) {
-					switch metricType {
-					case counter:
-						// for counter type metric
-						collector.(prometheus.Counter).Inc()
-
-					case gauge:
-						// for gauge type metric
-						// filter gauge number from message
-						numStr := r.ReplaceAllLiteralString(msg, "")
-						s, err := strconv.ParseFloat(numStr, 64)
-						if err != nil {
-							fmt.Printf("parse error: %s\n", err)
-						}
-
-						collector.(prometheus.Gauge).Set(s)
-
-					default:
-						fmt.Printf("generate output failed: unsupported metric type %d", metricType)
-					}
-				}
-			}
-		case <-quitCh:
-			for _, m := range a.metricCfgs {
-				prometheus.Unregister(m.collector)
-			}
-			return
-		default:
-		}
-	}
 }
 
 // Output event
@@ -292,7 +279,7 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 	// find app in the app map of channels
 	if appCh, ok := appMap[appName]; ok {
 		// send data to the data channel
-		appCh.dataCh <- &event
+		appCh.dataCh <- event
 	}
 
 	return
