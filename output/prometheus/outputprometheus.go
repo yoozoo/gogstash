@@ -106,7 +106,7 @@ func loadAppConfig() (*prometheus_conf.Config, error) {
 			// create new appCh and create new data channel and config channel
 			a := &appCh{
 				dataCh: make(chan logevent.LogEvent),
-				cfgCh:  make(chan *prometheus_conf.AppConfig, 1),
+				cfgCh:  make(chan *prometheus_conf.AppConfig),
 				quitCh: make(chan bool),
 			}
 			go processOutput(a.dataCh, a.cfgCh, a.quitCh)
