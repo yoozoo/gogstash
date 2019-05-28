@@ -275,11 +275,13 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 	// filter by app name
 	appName := event.GetString(appNameField)
 
+	mutex.RLock()
 	// find app in the app map of channels
 	if appCh, ok := appMap[appName]; ok {
 		// send data to the data channel
 		appCh.dataCh <- event
 	}
+	mutex.RUnlock()
 
 	return
 }
