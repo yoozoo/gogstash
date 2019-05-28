@@ -32,10 +32,9 @@ const (
 )
 
 var (
-	regexMap = make(map[string]*regexp.Regexp)
-	appMap   = make(map[string]*appCh)
-	mutex    sync.RWMutex
-	reader   *protoconf.ConfigurationReader
+	appMap = make(map[string]*appCh)
+	mutex  sync.RWMutex
+	reader *protoconf.ConfigurationReader
 )
 
 // OutputConfig holds the configuration json fields and internal objects
