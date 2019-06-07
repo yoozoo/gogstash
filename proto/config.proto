@@ -13,18 +13,18 @@ message Config {
 }
 
 message AppConfig {
-    string app_name = 1;
+    string app_name = 1 [(default)="app_name"];
     map<string, Metric> metrics = 2;
 }
 
 message Metric {
-    string metric_name = 1;
-    int32 metric_type = 2;
-    string message_regex = 3;
+    string metric_name = 1 [(default)="metric_name"];
+    int32 metric_type = 2 [(default)="0"];
+    string message_regex = 3 [(default)="*"];
     map<string, Filter> filters = 4;
 }
 
 message Filter {
-    string field = 1;
-    string regex = 2;
+    string field = 1 [(default)="field_name"];
+    string regex = 2 [(default)="*"];
 }
