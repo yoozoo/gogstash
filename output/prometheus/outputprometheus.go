@@ -253,13 +253,18 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 
 				isMatch := true
 				for k, v := range m.filters {
-					if !v.regex.MatchString(data.GetString(k)) {
+					if v.regex == nil {
+						fmt.Printf("filter %s check failed: regex nil", k)
 						isMatch = false
+						break
+					} else if !v.regex.MatchString(data.GetString(k)) {
+						isMatch = false
+						break
 					}
 				}
 
 				msg := data.Message
-				if isMatch {
+				if m.msgRegex != nil && isMatch {
 					switch metricType {
 					case counter:
 						// for counter type metric
@@ -318,7 +323,7 @@ func isMetricEqual(old *metricCfg, new *metricCfg) bool {
 	return false
 }
 
-func (a *appCfg) regNewMetric(m *metricCfg) error {
+func (a *appCfg) regNewMetric(m *metricCfg) (err error) {
 	metricType := m.metricType
 	metricName := m.metricName
 
@@ -349,11 +354,17 @@ func (a *appCfg) regNewMetric(m *metricCfg) error {
 
 	// compile regex
 	for _, v := range m.filters {
-		v.regex = regexp.MustCompile(v.regexStr)
+		v.regex, err = regexp.Compile(v.regexStr)
+		if err != nil {
+			fmt.Printf("compile regex failed: %s\n", err)
+		}
 	}
 
 	m.collector = collector
-	m.msgRegex = regexp.MustCompile(m.msgRegexStr)
+	m.msgRegex, err = regexp.Compile(m.msgRegexStr)
+	if err != nil {
+		return err
+	}
 	a.metricCfgs[metricName] = m
 
 	return nil
