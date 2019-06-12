@@ -8,23 +8,23 @@ option go_package = "prometheus";
 option (app_name) = "北美平台-gogstash";
 
 message Config {
-    string address = 1 [(default)="8080", (watch)=true];
+    string address = 1 [(default)="8080"];
     map<string, AppConfig> app_configs = 2 [(watch)=true];
 }
 
 message AppConfig {
-    string app_name = 1 [(default)="app_name"];
+    string app_name = 1 [(default)="app name"];
     map<string, Metric> metrics = 2;
 }
 
 message Metric {
-    string metric_name = 1 [(default)="metric_name"];
+    string metric_name = 1 [(default)="metric name"];
     int32 metric_type = 2 [(default)="0"];
     string message_regex = 3 [(default)="message regex"];
     map<string, Filter> filters = 4;
 }
 
 message Filter {
-    string field = 1 [(default)="field_name"];
+    string field = 1 [(default)="field name"];
     string regex = 2 [(default)="regex"];
 }

@@ -34,9 +34,24 @@ const (
 )
 
 var (
-	appMap = make(map[string]*appCh)
-	mutex  sync.RWMutex
+	apps = appMap{
+		m: make(map[string]*appCh),
+	}
+
+	metrics = metricMap{
+		m: make(map[string]prometheus.Collector),
+	}
 )
+
+type appMap struct {
+	m map[string]*appCh
+	sync.RWMutex
+}
+
+type metricMap struct {
+	m map[string]prometheus.Collector
+	sync.RWMutex
+}
 
 // OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
@@ -63,7 +78,7 @@ type metricCfg struct {
 	metricName  string
 	metricType  int32
 	msgRegexStr string
-	collector   prometheus.Collector
+	metric      prometheus.Collector
 	filters     map[string]*filterCfg
 	msgRegex    *regexp.Regexp
 }
@@ -132,7 +147,7 @@ func loadAppConfig() {
 	for k, appConfig := range conf.GetApp_configs() {
 		appName := appConfig.GetApp_name()
 
-		mutex.Lock()
+		apps.Lock()
 
 		newCfg := appCfg{
 			appName:    appName,
@@ -156,7 +171,7 @@ func loadAppConfig() {
 			}
 		}
 
-		if a, ok := appMap[appName]; ok {
+		if a, ok := apps.m[appName]; ok {
 			a.cfgCh <- newCfg
 		} else {
 			// new app config
@@ -169,22 +184,22 @@ func loadAppConfig() {
 			}
 			go processOutput(a.dataCh, a.cfgCh, a.quitCh)
 			a.cfgCh <- newCfg
-			appMap[appName] = a
+			apps.m[appName] = a
 		}
 
-		mutex.Unlock()
+		apps.Unlock()
 		newApps[appName] = 1
 	}
 
 	// check if app config not exist in runtime, delete it
-	for appName, a := range appMap {
-		mutex.Lock()
+	apps.Lock()
+	for appName, a := range apps.m {
 		if _, ok := newApps[appName]; !ok {
 			a.quitCh <- true
-			delete(appMap, appName)
+			delete(apps.m, appName)
 		}
-		mutex.Unlock()
 	}
+	apps.Unlock()
 
 }
 
@@ -218,7 +233,7 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 				if m, ok := a.metricCfgs[metricName]; ok {
 					if !isMetricEqual(m, metricCfg) {
 						// metric not the same
-						prometheus.Unregister(m.collector)
+						a.deleteMetric(m)
 						err := a.regNewMetric(metricCfg)
 						if err != nil {
 							fmt.Printf("failed to register new metric: %s\n", err)
@@ -238,17 +253,17 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 			}
 
 			// delete metrics not exist in runtime
-			for _, metricCfg := range a.metricCfgs {
-				if _, ok := newMetricMap[metricCfg.metricName]; !ok {
-					prometheus.Unregister(metricCfg.collector)
-					delete(a.metricCfgs, metricCfg.metricName)
+			for metricName, metricCfg := range a.metricCfgs {
+				if _, ok := newMetricMap[metricName]; !ok {
+					a.deleteMetric(metricCfg)
+					delete(a.metricCfgs, metricName)
 				}
 			}
 		case data := <-dataCh:
 			// new data comes
 			// check each rule in the app config
 			for _, m := range a.metricCfgs {
-				collector := m.collector
+				metric := m.metric
 				metricType := m.metricType
 
 				isMatch := true
@@ -269,7 +284,8 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 					case counter:
 						// for counter type metric
 						if m.msgRegex.MatchString(msg) {
-							collector.(prometheus.Counter).Inc()
+							collector := metric.(prometheus.CounterVec)
+							collector.WithLabelValues(a.prodID, a.prodName, a.appName).Inc()
 						}
 
 					case gauge:
@@ -281,8 +297,8 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 							if err != nil {
 								fmt.Printf("parse error: %s\n", err)
 							}
-
-							collector.(prometheus.Gauge).Set(s)
+							collector := metric.(prometheus.GaugeVec)
+							collector.WithLabelValues(a.prodID, a.prodName, a.appName).Set(s)
 						}
 
 					default:
@@ -293,7 +309,7 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 		case <-quitCh:
 			// quit goroutine and unregister all metrics when app is deleted
 			for _, m := range a.metricCfgs {
-				prometheus.Unregister(m.collector)
+				a.deleteMetric(m)
 			}
 			return
 		default:
@@ -323,34 +339,53 @@ func isMetricEqual(old *metricCfg, new *metricCfg) bool {
 	return false
 }
 
+func (a *appCfg) deleteMetric(m *metricCfg) {
+	metric := m.metric
+	switch m.metricType {
+	case counter:
+		collector := metric.(prometheus.CounterVec)
+		collector.DeleteLabelValues(a.prodID, a.prodName, a.appName)
+	case gauge:
+		collector := metric.(prometheus.GaugeVec)
+		collector.DeleteLabelValues(a.prodID, a.prodName, a.appName)
+	}
+}
+
 func (a *appCfg) regNewMetric(m *metricCfg) (err error) {
 	metricType := m.metricType
 	metricName := m.metricName
 
-	// add new metric collector
-	var collector prometheus.Collector
-	// according to metric type
-	switch metricType {
-	case counter:
-		collector = prometheus.NewCounter(prometheus.CounterOpts{
-			Name:        metricName,
-			Help:        "counter type: " + a.appName + "_" + metricName,
-			ConstLabels: prometheus.Labels{"_product_id": a.prodID, "_product_name": a.prodName, "_name": a.appName},
-		})
-	case gauge:
-		collector = prometheus.NewGauge(prometheus.GaugeOpts{
-			Name:        metricName,
-			Help:        "gauge type:" + a.appName + "_" + metricName,
-			ConstLabels: prometheus.Labels{"_product_id": a.prodID, "_product_name": a.prodName, "_name": a.appName},
-		})
-	default:
-		return fmt.Errorf("config init failed: unsupported metric type")
-	}
+	// register new metric if not exists
+	metrics.Lock()
+	metric, ok := metrics.m[metricName]
+	if !ok {
+		// according to metric type
+		switch metricType {
+		case counter:
+			metric = *prometheus.NewCounterVec(prometheus.CounterOpts{
+				Name: metricName,
+				Help: "default help",
+			}, []string{"_product_id", "_product_name", "_name"})
 
-	// register collector for each app
-	if err := prometheus.Register(collector); err != nil {
-		return err
+		case gauge:
+			metric = *prometheus.NewGaugeVec(prometheus.GaugeOpts{
+				Name: metricName,
+				Help: "default help",
+			}, []string{"_product_id", "_product_name", "_name"})
+
+		default:
+			return fmt.Errorf("config init failed: unsupported metric type")
+		}
+
+		// register collector for each app
+		if err := prometheus.Register(metric); err != nil {
+			return err
+		}
+		metrics.m[metricName] = metric
 	}
+	metrics.Unlock()
+
+	m.metric = metric
 
 	// compile regex
 	for _, v := range m.filters {
@@ -360,7 +395,6 @@ func (a *appCfg) regNewMetric(m *metricCfg) (err error) {
 		}
 	}
 
-	m.collector = collector
 	m.msgRegex, err = regexp.Compile(m.msgRegexStr)
 	if err != nil {
 		return err
@@ -375,13 +409,13 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 	// filter by app name
 	appName := event.GetString(appNameField)
 
-	mutex.RLock()
+	apps.RLock()
 	// find app in the app map of channels
-	if appCh, ok := appMap[appName]; ok {
+	if appCh, ok := apps.m[appName]; ok {
 		// send data to the data channel
 		appCh.dataCh <- event
 	}
-	mutex.RUnlock()
+	apps.RUnlock()
 
 	return
 }
