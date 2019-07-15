@@ -312,7 +312,6 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan appCfg, quitCh chan
 				a.deleteMetric(m)
 			}
 			return
-		default:
 		}
 	}
 }
