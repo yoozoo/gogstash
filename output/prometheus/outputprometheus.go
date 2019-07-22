@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -35,27 +36,14 @@ const (
 )
 
 var (
-	apps = appMap{
-		m: make(map[string]*appCh),
-	}
-
-	metrics = metricMap{
-		m: make(map[string]prometheus.Collector),
-	}
+	appLoader atomic.Value
 
 	counterRegistry = prometheus.NewRegistry()
 	gaugeRegistry   = prometheus.NewRegistry()
+
+	// used to lock the config map
+	reloadMutex sync.Mutex
 )
-
-type appMap struct {
-	m map[string]*appCh
-	sync.RWMutex
-}
-
-type metricMap struct {
-	m map[string]prometheus.Collector
-	sync.RWMutex
-}
 
 // OutputConfig holds the configuration json fields and internal objects
 type OutputConfig struct {
@@ -94,6 +82,10 @@ type filterCfg struct {
 }
 
 func initConfig() (*OutputConfig, error) {
+
+	// initial with empty apps
+	appLoader.Store(make(map[string]*appCh))
+
 	// load app config from protoconf
 	etcd := protoconf.NewEtcdReader(env)
 	etcd.SetToken(appToken)
@@ -108,7 +100,12 @@ func initConfig() (*OutputConfig, error) {
 	go reloadCfg(reloadCh)
 
 	// watch app configuration change
-	conf.WatchApp_configs(func(string) { reloadCh <- true })
+	conf.WatchApp_configs(func(string) {
+		reloadMutex.Lock()
+		reloadCh <- true
+		reloadMutex.Unlock()
+	})
+
 	reader.WatchKeys(conf)
 
 	outputConf := &OutputConfig{
@@ -145,8 +142,15 @@ func reloadCfg(reloadCh chan bool) {
 }
 
 func loadAppConfig() {
+
 	conf := prometheus_conf.GetInstance()
-	newApps := make(map[string]int)
+	// the apps tp create from configuration. once create, no modify to it.
+	newApps := make(map[string]*appCh)
+	// load current apps
+	oldApps := appLoader.Load().(map[string]*appCh)
+
+	// no update to app settings during loading
+	reloadMutex.Lock()
 
 	for k, appConfig := range conf.GetApp_configs() {
 		if len(appConfig.GetMetrics()) == 0 {
@@ -177,41 +181,33 @@ func loadAppConfig() {
 			}
 		}
 
-		if a, ok := apps.m[appName]; ok {
+		if a, ok := oldApps[appName]; ok {
+			// copy existing app and send the cfg
+			newApps[appName] = a
 			a.cfgCh <- &newCfg
 		} else {
-			// new app config
-			// send app config to the config channel
-			// create new appCh and create new data channel and config channel
+			// create new app and send the cfg
 			a := &appCh{
 				dataCh: make(chan logevent.LogEvent, 1000),
 				cfgCh:  make(chan *appCfg, 1),
 				quitCh: make(chan bool),
 			}
 			go processOutput(a.dataCh, a.cfgCh, a.quitCh)
+			newApps[appName] = a
 			a.cfgCh <- &newCfg
-			apps.Lock()
-			apps.m[appName] = a
-			apps.Unlock()
 		}
-		newApps[appName] = 1
 	}
+	reloadMutex.Unlock()
+	// store new apps as current
+	appLoader.Store(newApps)
 
-	// check if app config not exist in runtime, delete it
-	var removeList []chan bool
-	apps.Lock()
-	for appName, a := range apps.m {
+	// check if app config not exist in runtime, send quit signal
+	// notice here no delete from the map
+	for appName, a := range oldApps {
 		if _, ok := newApps[appName]; !ok {
-			removeList = append(removeList, a.quitCh)
-			delete(apps.m, appName)
+			a.quitCh <- true
 		}
 	}
-	apps.Unlock()
-
-	for _, c := range removeList {
-		c <- true
-	}
-
 }
 
 // InitHandler initialize the output plugin
@@ -433,15 +429,13 @@ func registerMetric(m *metricCfg, label map[string]string) (err error) {
 func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	// filter by app name
 	appName := event.GetString(appNameField)
-
-	apps.RLock()
-	// find app in the app map of channels
-	if appCh, ok := apps.m[appName]; ok {
-		// send data to the data channel
-		appCh.dataCh <- event
+	if len(appName) > 0 {
+		if apps, ok := appLoader.Load().(map[string]appCh); ok {
+			if app, ok := apps[appName]; ok {
+				app.dataCh <- event
+			}
+		}
 	}
-	apps.RUnlock()
-
 	return
 }
 
