@@ -2,7 +2,7 @@ package outputprometheus
 
 import (
 	"context"
-	"fmt"
+	"errors"
 	"net/http"
 	"regexp"
 	"strconv"
@@ -30,7 +30,7 @@ const (
 	// appNameField is the field for app name
 	appNameField = "fields.log_topics"
 	// protoconf default config
-	appToken    = "U2FsdGVkX1/ABMEECkUiiZ6wKgfA3R5pDR7iOvwrBbhqkulGlZ1pDFX/9mVDCQiP"
+
 	env         = "default"
 	reloadDelay = 10 * time.Second
 )
@@ -43,6 +43,8 @@ var (
 
 	// used to lock the config map
 	reloadMutex sync.Mutex
+
+	appToken string
 )
 
 // OutputConfig holds the configuration json fields and internal objects
@@ -86,6 +88,9 @@ func initConfig() (*OutputConfig, error) {
 	// initial with empty apps
 	appLoader.Store(make(map[string]*appCh))
 
+	if len(strings.TrimSpace(appToken)) == 0 {
+		goglog.Logger.Fatalln("Empty app token. Plsase set in output.type.token")
+	}
 	// load app config from protoconf
 	etcd := protoconf.NewEtcdReader(env)
 	etcd.SetToken(appToken)
@@ -212,6 +217,12 @@ func loadAppConfig() {
 
 // InitHandler initialize the output plugin
 func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
+
+	if token, ok := (*raw)["token"]; ok {
+		if token, ok := token.(string); ok {
+			appToken = token
+		}
+	}
 	// initialize config
 	conf, err := initConfig()
 	if err != nil {
@@ -237,21 +248,21 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 					if metricCfg, ok := cfg.metricCfgs[newMetricCfg.metricName]; ok {
 						if !isMetricEqual(metricCfg, newMetricCfg) {
 							// metric not the same
-							fmt.Println("modify metric", metricCfg.metricName)
+							goglog.Logger.Debugln("modify metric", metricCfg.metricName)
 							deleteMetric(metricCfg)
 							err := registerMetric(newMetricCfg, label)
 							if err != nil {
-								fmt.Printf("failed to register new metric: %s\n", err)
+								goglog.Logger.Errorf("failed to register new metric: %s\n", err)
 							}
 						} else {
 							newCfg.metricCfgs[metricCfg.metricName] = metricCfg
 						}
 					} else {
 						// add new metric
-						fmt.Println("add metric", newMetricCfg.metricName)
+						goglog.Logger.Debugln("add metric", newMetricCfg.metricName)
 						err := registerMetric(newMetricCfg, label)
 						if err != nil {
-							fmt.Printf("failed to register new metric: %s\n", err)
+							goglog.Logger.Errorf("failed to register new metric: %s\n", err)
 						}
 					}
 				}
@@ -259,16 +270,16 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 				// delete metrics not exist in runtime
 				for metricName, metricCfg := range cfg.metricCfgs {
 					if _, ok := newCfg.metricCfgs[metricName]; !ok {
-						fmt.Println("delete old metric", metricName)
+						goglog.Logger.Debugln("delete old metric:", metricName)
 						deleteMetric(metricCfg)
 					}
 				}
 			} else {
 				if cfg != nil {
-					fmt.Println("delete all old metric", cfg.appName)
+					goglog.Logger.Debugln("delete all old metric:", cfg.appName)
 					cfg.deleteAllMetrics()
 				}
-				fmt.Println("add all new metric", newCfg.appName)
+				goglog.Logger.Debugln("add all new metric:", newCfg.appName)
 				newCfg.registerAllMetrics()
 			}
 			cfg = newCfg
@@ -286,7 +297,7 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 				isMatch := true
 				for k, v := range m.filters {
 					if v.regex == nil {
-						fmt.Printf("filter %s check failed: regex nil", k)
+						goglog.Logger.Errorf("filter %s check failed: regex nil", k)
 						isMatch = false
 						break
 					} else if !v.regex.MatchString(data.GetString(k)) {
@@ -310,20 +321,20 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 						if len(match) >= 2 {
 							s, err := strconv.ParseFloat(match[1], 64)
 							if err != nil {
-								fmt.Printf("parse error: %s\n", err)
+								goglog.Logger.Errorf("parse error: %s\n", err)
 							} else {
 								m.metric.(prometheus.Gauge).Set(s)
 							}
 						}
 					default:
-						fmt.Printf("generate output failed: unsupported metric type %d", m.metricType)
+						goglog.Logger.Errorf("generate output failed: unsupported metric type %d", m.metricType)
 					}
 				}
 			}
 		case <-quitCh:
 			// quit goroutine and unregister all metrics when app is deleted
 			if cfg != nil {
-				fmt.Println("delete before quit")
+				goglog.Logger.Debugln("delete before quit")
 				cfg.deleteAllMetrics()
 			}
 		}
@@ -353,7 +364,7 @@ func isMetricEqual(old *metricCfg, new *metricCfg) bool {
 
 func deleteMetric(m *metricCfg) {
 	if m.metric != nil {
-		fmt.Println("delete metric ", m.metricName)
+		goglog.Logger.Debugln("delete metric ", m.metricName)
 		switch m.metricType {
 		case counter:
 			counterRegistry.Unregister(m.metric)
@@ -380,19 +391,19 @@ func (a *appCfg) registerAllMetrics() {
 	}
 }
 func registerMetric(m *metricCfg, label map[string]string) (err error) {
-	fmt.Println("register for ", m.metricName, "with label", label)
+	goglog.Logger.Debugln("register for ", m.metricName, "with label", label)
 	// compile regex
 	for _, v := range m.filters {
 		v.regex, err = regexp.Compile(v.regexStr)
 		if err != nil {
-			fmt.Println("compile regex", v.regexStr, "failed:", err)
+			goglog.Logger.Errorln("compile regex", v.regexStr, "failed:", err)
 			return err
 		}
 	}
 
 	m.msgRegex, err = regexp.Compile(m.msgRegexStr)
 	if err != nil {
-		fmt.Println("compile regex", m.msgRegexStr, "failed:", err)
+		goglog.Logger.Errorln("compile regex", m.msgRegexStr, "failed:", err)
 		return err
 	}
 
@@ -421,7 +432,7 @@ func registerMetric(m *metricCfg, label map[string]string) (err error) {
 		}
 		return err
 	default:
-		return fmt.Errorf("config init failed: unsupported metric type")
+		return errors.New("config init failed: unsupported metric type")
 	}
 }
 
