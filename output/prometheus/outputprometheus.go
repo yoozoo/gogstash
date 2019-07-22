@@ -441,7 +441,7 @@ func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err
 	// filter by app name
 	appName := event.GetString(appNameField)
 	if len(appName) > 0 {
-		if apps, ok := appLoader.Load().(map[string]appCh); ok {
+		if apps, ok := appLoader.Load().(map[string]*appCh); ok {
 			if app, ok := apps[appName]; ok {
 				app.dataCh <- event
 			}
