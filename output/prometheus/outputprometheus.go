@@ -27,10 +27,7 @@ const (
 	counter = 0
 	// gauge is the gauge metric type
 	gauge = 1
-	// appNameField is the field for app name
-	appNameField = "fields.log_topics"
 	// protoconf default config
-
 	env         = "default"
 	reloadDelay = 10 * time.Second
 )
@@ -45,6 +42,9 @@ var (
 	reloadMutex sync.Mutex
 
 	appToken string
+
+	// appNameField is the field for app name
+	appNameField = "fields.log_topics"
 )
 
 // OutputConfig holds the configuration json fields and internal objects
@@ -69,12 +69,10 @@ type appCfg struct {
 
 // metricCfg holds the metric configuration
 type metricCfg struct {
-	metricName  string
-	metricType  int32
-	msgRegexStr string
-	metric      prometheus.Collector
-	filters     map[string]*filterCfg
-	msgRegex    *regexp.Regexp
+	metricName string
+	metricType int32
+	metric     prometheus.Collector
+	filters    []*filterCfg
 }
 
 type filterCfg struct {
@@ -171,21 +169,26 @@ func loadAppConfig() {
 			metricCfgs: make(map[string]*metricCfg),
 		}
 		for _, metric := range appConfig.GetMetrics() {
-			filterCfgs := make(map[string]*filterCfg)
-			for _, filter := range metric.GetFilters() {
-				filterCfgs[filter.GetField()] = &filterCfg{
-					regexStr: filter.GetRegex(),
-					field:    filter.GetField(),
+			var filterCfgs []*filterCfg
+
+			filters := metric.GetFilters()
+			for i := 0; i < len(filters); i++ {
+				if filter, ok := filters[strconv.Itoa(i)]; ok {
+					filterCfgs = append(filterCfgs, &filterCfg{
+						regexStr: filter.GetRegex(),
+						field:    filter.GetField(),
+					})
+				} else {
+					goglog.Logger.Errorln(k, metric.GetMetric_name(), "missing filter:", i)
 				}
 			}
 			newCfg.metricCfgs[metric.GetMetric_name()] = &metricCfg{
-				metricName:  metric.GetMetric_name(),
-				metricType:  int32(metric.GetMetric_type()),
-				msgRegexStr: metric.GetMessage_regex(),
-				filters:     filterCfgs,
+				metricName: metric.GetMetric_name(),
+				metricType: int32(metric.GetMetric_type()),
+				filters:    filterCfgs,
 			}
 		}
-
+		goglog.Logger.Debug("app:", appName, " cfg:", newCfg)
 		if a, ok := oldApps[appName]; ok {
 			// copy existing app and send the cfg
 			newApps[appName] = a
@@ -223,6 +226,13 @@ func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputC
 			appToken = token
 		}
 	}
+
+	if appField, ok := (*raw)["appField"]; ok {
+		if appField, ok := appField.(string); ok {
+			appNameField = appField
+		}
+	}
+
 	// initialize config
 	conf, err := initConfig()
 	if err != nil {
@@ -232,6 +242,68 @@ func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputC
 	go conf.serveHTTP()
 
 	return conf, nil
+}
+
+func getFieldValue(data *logevent.LogEvent, field string) (str string, ok bool) {
+	if field != "message" {
+		if v, exist := data.GetValue(field); exist {
+			switch tmp := v.(type) {
+			case string:
+				return tmp, true
+			case float64:
+				return strconv.FormatFloat(tmp, 'f', -1, 64), true
+			case bool:
+				return strconv.FormatBool(tmp), true
+			default:
+				return
+			}
+		}
+		return
+	}
+	// return data.message
+	return data.Message, true
+}
+
+func processCounter(data *logevent.LogEvent, m *metricCfg) {
+	for _, filter := range m.filters {
+		if str, ok := getFieldValue(data, filter.field); !ok {
+			goglog.Logger.Debug("failed to get field:", filter.field, " from event:", data)
+			return
+		} else if filter.regex != nil && !filter.regex.MatchString(str) {
+			goglog.Logger.Debug("failed to match regex:", filter.regexStr, " with string:", str)
+			return
+		}
+	}
+	m.metric.(prometheus.Counter).Inc()
+}
+func processGauge(data *logevent.LogEvent, m *metricCfg) {
+	filterSize := len(m.filters)
+	for i := 0; i < filterSize-1; i++ {
+		filter := m.filters[i]
+		if str, ok := getFieldValue(data, filter.field); !ok {
+			goglog.Logger.Debug("failed to get field:", filter.field, " from event:", data)
+			return
+		} else if filter.regex != nil && !filter.regex.MatchString(str) {
+			goglog.Logger.Debug("failed to match regex:", filter.regexStr, " with string:", str)
+			return
+		}
+	}
+	filter := m.filters[filterSize-1]
+	if str, ok := getFieldValue(data, filter.field); ok {
+		match := filter.regex.FindStringSubmatch(str)
+		if len(match) >= 2 {
+			s, err := strconv.ParseFloat(match[1], 64)
+			if err != nil {
+				goglog.Logger.Errorf("parse error: %s\n", err)
+			} else {
+				m.metric.(prometheus.Gauge).Set(s)
+			}
+		} else {
+			goglog.Logger.Debug("failed to match regex:", filter.regexStr, " with string:", str)
+		}
+	} else {
+		goglog.Logger.Debug("failed to get field:", filter.field, " from event:", data)
+	}
 }
 
 func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh chan bool) {
@@ -293,43 +365,15 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 				if m.metric == nil {
 					continue
 				}
-
-				isMatch := true
-				for k, v := range m.filters {
-					if v.regex == nil {
-						goglog.Logger.Errorf("filter %s check failed: regex nil", k)
-						isMatch = false
-						break
-					} else if !v.regex.MatchString(data.GetString(k)) {
-						isMatch = false
-						break
-					}
+				switch m.metricType {
+				case counter:
+					processCounter(&data, m)
+				case gauge:
+					processGauge(&data, m)
+				default:
+					goglog.Logger.Errorf("generate output failed: unsupported metric type %d", m.metricType)
 				}
 
-				msg := data.Message
-				if m.msgRegex != nil && isMatch {
-					switch m.metricType {
-					case counter:
-						// for counter type metric
-						if m.msgRegex.MatchString(msg) {
-							m.metric.(prometheus.Counter).Inc()
-						}
-					case gauge:
-						// for gauge type metric
-						// filter gauge number from message
-						match := m.msgRegex.FindStringSubmatch(msg)
-						if len(match) >= 2 {
-							s, err := strconv.ParseFloat(match[1], 64)
-							if err != nil {
-								goglog.Logger.Errorf("parse error: %s\n", err)
-							} else {
-								m.metric.(prometheus.Gauge).Set(s)
-							}
-						}
-					default:
-						goglog.Logger.Errorf("generate output failed: unsupported metric type %d", m.metricType)
-					}
-				}
 			}
 		case <-quitCh:
 			// quit goroutine and unregister all metrics when app is deleted
@@ -342,24 +386,18 @@ func processOutput(dataCh chan logevent.LogEvent, cfgCh chan *appCfg, quitCh cha
 }
 
 func isMetricEqual(old *metricCfg, new *metricCfg) bool {
-	if old.metricType == new.metricType && old.msgRegexStr == new.msgRegexStr {
-		if len(old.filters) != len(new.filters) {
+	if old.metricType != new.metricType || len(old.filters) != len(new.filters) {
+		return false
+	}
+
+	for k, filter1 := range new.filters {
+		filter2 := old.filters[k]
+		if filter1.field != filter2.field || filter1.regexStr != filter2.regexStr {
 			return false
 		}
-
-		for k, v := range new.filters {
-			if f, ok := old.filters[k]; ok {
-				if v.field != f.field || v.regexStr != f.regexStr {
-					return false
-				}
-			} else {
-				return false
-			}
-		}
-
-		return true
 	}
-	return false
+
+	return true
 }
 
 func deleteMetric(m *metricCfg) {
@@ -391,20 +429,20 @@ func (a *appCfg) registerAllMetrics() {
 	}
 }
 func registerMetric(m *metricCfg, label map[string]string) (err error) {
-	goglog.Logger.Debugln("register for ", m.metricName, "with label", label)
+
+	if len(m.filters) == 0 && m.metricType != counter {
+		return errors.New("non counter metric must have at least one filter")
+	}
 	// compile regex
 	for _, v := range m.filters {
-		v.regex, err = regexp.Compile(v.regexStr)
-		if err != nil {
-			goglog.Logger.Errorln("compile regex", v.regexStr, "failed:", err)
-			return err
+		if len(v.regexStr) != 0 {
+			regex, err := regexp.Compile(v.regexStr)
+			if err != nil {
+				goglog.Logger.Errorln("compile regex", v.regexStr, "failed:", err)
+				return err
+			}
+			v.regex = regex
 		}
-	}
-
-	m.msgRegex, err = regexp.Compile(m.msgRegexStr)
-	if err != nil {
-		goglog.Logger.Errorln("compile regex", m.msgRegexStr, "failed:", err)
-		return err
 	}
 
 	// register new metric if not exists
@@ -418,9 +456,19 @@ func registerMetric(m *metricCfg, label map[string]string) (err error) {
 		err := counterRegistry.Register(metric)
 		if err == nil {
 			m.metric = metric
+			goglog.Logger.Debug("new metric:", m)
+			for _, filter := range m.filters {
+				goglog.Logger.Debug("     filter:", filter)
+			}
 		}
+
 		return err
 	case gauge:
+		filter := m.filters[len(m.filters)-1]
+		if filter.regex == nil || filter.regex.NumSubexp() < 1 {
+			goglog.Logger.Errorln("Gauge: last filter must have a capture")
+			return errors.New("Gauge: last filter must have a capture")
+		}
 		metric := prometheus.NewGauge(prometheus.GaugeOpts{
 			Name:        m.metricName,
 			Help:        "default help",
@@ -429,7 +477,12 @@ func registerMetric(m *metricCfg, label map[string]string) (err error) {
 		err := gaugeRegistry.Register(metric)
 		if err == nil {
 			m.metric = metric
+			goglog.Logger.Debug("new metric:", m)
+			for _, filter := range m.filters {
+				goglog.Logger.Debug("     filter:", filter)
+			}
 		}
+
 		return err
 	default:
 		return errors.New("config init failed: unsupported metric type")
