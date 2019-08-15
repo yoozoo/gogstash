@@ -30,6 +30,9 @@ const (
 	// protoconf default config
 	env         = "default"
 	reloadDelay = 10 * time.Second
+
+	tokenFieldName = "token"
+	appFieldName   = "appField"
 )
 
 var (
@@ -44,7 +47,7 @@ var (
 	appToken string
 
 	// appNameField is the field for app name
-	appNameField = "fields.log_topics"
+	appField = "log_topics"
 )
 
 // OutputConfig holds the configuration json fields and internal objects
@@ -156,11 +159,11 @@ func loadAppConfig() {
 	reloadMutex.Lock()
 
 	for k, appConfig := range conf.GetApp_configs() {
-		if len(appConfig.GetMetrics()) == 0 {
+		appName := appConfig.GetApp_name()
+
+		if len(appName) == 0 || len(appConfig.GetMetrics()) == 0 {
 			continue
 		}
-
-		appName := appConfig.GetApp_name()
 
 		newCfg := appCfg{
 			appName:    appName,
@@ -169,6 +172,11 @@ func loadAppConfig() {
 			metricCfgs: make(map[string]*metricCfg),
 		}
 		for _, metric := range appConfig.GetMetrics() {
+			name := metric.GetMetric_name()
+			if len(name) == 0 {
+				continue
+			}
+
 			var filterCfgs []*filterCfg
 
 			filters := metric.GetFilters()
@@ -179,11 +187,11 @@ func loadAppConfig() {
 						field:    filter.GetField(),
 					})
 				} else {
-					goglog.Logger.Errorln(k, metric.GetMetric_name(), "missing filter:", i)
+					goglog.Logger.Errorln(k, name, "missing filter:", i)
 				}
 			}
-			newCfg.metricCfgs[metric.GetMetric_name()] = &metricCfg{
-				metricName: metric.GetMetric_name(),
+			newCfg.metricCfgs[name] = &metricCfg{
+				metricName: name,
 				metricType: int32(metric.GetMetric_type()),
 				filters:    filterCfgs,
 			}
@@ -221,15 +229,15 @@ func loadAppConfig() {
 // InitHandler initialize the output plugin
 func InitHandler(ctx context.Context, raw *config.ConfigRaw) (config.TypeOutputConfig, error) {
 
-	if token, ok := (*raw)["token"]; ok {
+	if token, ok := (*raw)[tokenFieldName]; ok {
 		if token, ok := token.(string); ok {
 			appToken = token
 		}
 	}
 
-	if appField, ok := (*raw)["appField"]; ok {
-		if appField, ok := appField.(string); ok {
-			appNameField = appField
+	if appFieldValue, ok := (*raw)[appFieldName]; ok {
+		if appFieldValue, ok := appFieldValue.(string); ok {
+			appField = appFieldValue
 		}
 	}
 
@@ -492,7 +500,7 @@ func registerMetric(m *metricCfg, label map[string]string) (err error) {
 // Output event
 func (o *OutputConfig) Output(ctx context.Context, event logevent.LogEvent) (err error) {
 	// filter by app name
-	appName := event.GetString(appNameField)
+	appName := event.GetString(appField)
 	if len(appName) > 0 {
 		if apps, ok := appLoader.Load().(map[string]*appCh); ok {
 			if app, ok := apps[appName]; ok {
