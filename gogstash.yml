@@ -1,16 +1,21 @@
 input:
   - type: "beats"
-    host: "172.29.58.96"
+    host: "0.0.0.0"
     port: 5044
-
+  - type: "exec"
+    command: "./test/test_exec.sh"
+    interval: 1
+    message_type: json
 # filter:
 #   - type: mutate
 #     replace: ["gameId", "game_id"]
 
 output:
   - type: "elastic"
-    url: ["http://172.29.58.96:9200"]
-    index: "%{[log_topics]}--%{+YYYY.MM.dd}"
-    document_type: "%{[@metadata][type]}"
+    url: ["http://172.29.57.201:9200"]
+    index: "%{log_topics}--%{+@2006.01.02}"
+    document_type: "_doc"
 
   - type: "prometheus"
+    token: "U2FsdGVkX1/ABMEECkUiiZ6wKgfA3R5pDR7iOvwrBbhqkulGlZ1pDFX/9mVDCQiP"
+    appField: "log_topics"
